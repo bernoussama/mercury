@@ -1,0 +1,23 @@
+origin: bernoussama.com.
+ttl: 3600
+soa:
+  mname: ns1.bernoussama.com.
+  rname: admin.bernoussama.com.
+  serial: 2024110400
+  refresh: 3600
+  retry: 600
+  expire: 604800
+  minimum: 86400
+ns:
+  - host: ns1.bernoussama.com.
+  - host: ns2.bernoussama.com.
+a:
+  - name: "@"
+    ttl: 400
+    value: 255.255.255.255
+  - name: "@"
+    ttl: 400
+    value: 127.0.0.1
+  - name: "@"
+    ttl: 400
+    value: 127.0.0.1
