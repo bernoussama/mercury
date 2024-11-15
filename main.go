@@ -68,7 +68,7 @@ func loadZones() {
 type Message struct {
 	Expiry     time.Time
 	Bytes      []byte
-	Question   Question
+	Questions  []Question
 	Answers    []Answer
 	Authority  []Answer
 	Additional []Answer
@@ -283,7 +283,9 @@ func (msg *Message) Encode() []byte {
 	var msgBytes []byte
 
 	msgBytes = append(msgBytes, msg.Header.Encode()...)
-	msgBytes = append(msgBytes, msg.Question.Encode()...)
+	for _, question := range msg.Questions {
+		msgBytes = append(msgBytes, question.Encode()...)
+	}
 	for _, answer := range msg.Answers {
 		msgBytes = append(msgBytes, answer.Encode(msg)...)
 	}
@@ -414,10 +416,24 @@ func decodeAdditional(msg *Message, data []byte) int {
 func (msg *Message) Decode(data []byte) (int, error) {
 	// Decoding logic here
 	err := msg.Header.Decode(data[:hSize])
-	qOffset, err := msg.Question.Decode(data[hSize:])
 	if err != nil {
 		return 0, err
 	}
+
+	qOffset := 0
+	for i := 0; i < int(msg.Header.QDCount); i++ {
+		question := Question{}
+		offset, err := question.Decode(data[hSize:])
+		if err != nil {
+			return 0, err
+		}
+		msg.Questions = append(msg.Questions, question)
+		qOffset += offset
+	}
+	// qOffset, err := msg.Question.Decode(data[hSize:])
+	// if err != nil {
+	// 	return 0, err
+	// }
 
 	mSize := qOffset + hSize
 	// if message is response
@@ -518,8 +534,10 @@ func (msg *Message) Resolve(nameServer string) error {
 	message.Decode(res)
 	if message.Header.ANCount != 0 {
 		for _, answer := range message.Answers {
-			if answer.Type == uint16(msg.Question.QType) {
-				msg.Answers = append(msg.Answers, answer)
+			for _, question := range msg.Questions {
+				if answer.Type == uint16(question.QType) {
+					msg.Answers = append(msg.Answers, answer)
+				}
 			}
 		}
 	} else if message.Header.NSCount != 0 {
