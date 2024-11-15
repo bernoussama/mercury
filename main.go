@@ -11,12 +11,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 // DNS header size
-const hSize = 12
+const (
+	hSize       = 12
+	BUFFER_SIZE = 2048
+)
+
+var dnsCache = RecordsCache{records: make(map[string]Message)}
 
 type ARecord struct {
 	Name  string `yaml:"name"`
@@ -60,10 +66,13 @@ func loadZones() {
 
 // DNS Message Structure
 type Message struct {
-	Bytes    []byte
-	Question Question
-	Answers  []Answer
-	Header   Header
+	Expiry     time.Time
+	Bytes      []byte
+	Question   Question
+	Answers    []Answer
+	Authority  []Answer
+	Additional []Answer
+	Header     Header
 }
 
 // 16bits used for bit shifting
@@ -79,8 +88,8 @@ type Header struct {
 	RCODE   uint16 // Response code
 	QDCount uint16 // Question count
 	ANCount uint16 // Answer count
-	NSCount uint16 // Name servers count
-	ARCount uint16 // Authority count
+	NSCount uint16 // Authority records count
+	ARCount uint16 // Additional records count
 }
 
 // DNSQuestion represents a question in the DNS message
@@ -141,6 +150,36 @@ var types = map[QType]string{
 	TypeTXT:   "txt",
 }
 
+type Cache interface {
+	Get(key string) (Message, bool)
+	Set(key string, msg Message)
+	Delete(key string)
+}
+
+type RecordsCache struct {
+	records map[string]Message
+}
+
+func (c *RecordsCache) Get(key string) (*Message, bool) {
+	if val, ok := c.records[key]; ok {
+		if val.Expiry.Before(time.Now()) {
+			delete(c.records, key)
+			return nil, false
+		}
+		return &val, ok
+	}
+	return nil, false
+}
+
+func (c *RecordsCache) Set(key string, msg Message) {
+	msg.Expiry = time.Now().Add(time.Duration(msg.Answers[0].TTL) * time.Second)
+	c.records[key] = msg
+}
+
+func (c *RecordsCache) Delete(key string) {
+	delete(c.records, key)
+}
+
 type DomainName string
 
 // encode domain name to dns wire format
@@ -195,8 +234,6 @@ func (header *Header) Encode() []byte {
 	binary.BigEndian.PutUint16(headerBytes[6:], header.ANCount)
 	binary.BigEndian.PutUint16(headerBytes[8:], header.NSCount)
 	binary.BigEndian.PutUint16(headerBytes[10:], header.ARCount)
-	log.Println("header id: ", header.ID)
-	log.Println("headerBytes: ", headerBytes)
 	return headerBytes
 }
 
@@ -226,7 +263,6 @@ func encodeIP(ip string) []byte {
 
 func (answer *Answer) Encode(msg *Message) []byte {
 	var answerBytes []byte
-	// Encoding logic here
 
 	temp16 := make([]byte, 2)
 	temp32 := make([]byte, 4)
@@ -245,7 +281,18 @@ func (answer *Answer) Encode(msg *Message) []byte {
 
 func (msg *Message) Encode() []byte {
 	var msgBytes []byte
-	// Encoding logic here
+
+	msgBytes = append(msgBytes, msg.Header.Encode()...)
+	msgBytes = append(msgBytes, msg.Question.Encode()...)
+	for _, answer := range msg.Answers {
+		msgBytes = append(msgBytes, answer.Encode(msg)...)
+	}
+	for _, answer := range msg.Authority {
+		msgBytes = append(msgBytes, answer.Encode(msg)...)
+	}
+	for _, answer := range msg.Additional {
+		msgBytes = append(msgBytes, answer.Encode(msg)...)
+	}
 	return msgBytes
 }
 
@@ -267,7 +314,6 @@ func (header *Header) Decode(data []byte) error {
 	header.ANCount = binary.BigEndian.Uint16(data[6:8])
 	header.NSCount = binary.BigEndian.Uint16(data[8:10])
 	header.ARCount = binary.BigEndian.Uint16(data[10:12])
-	log.Println(header)
 	return nil
 }
 
@@ -279,8 +325,90 @@ func (question *Question) Decode(data []byte) (int, error) {
 	}
 	question.DomainName = dn
 	question.QType = QType(binary.BigEndian.Uint16(data[qOffset : qOffset+2]))
-	question.QClass = binary.BigEndian.Uint16(data[qOffset+2 : qOffset+4])
+	qOffset += 2
+	question.QClass = binary.BigEndian.Uint16(data[qOffset : qOffset+2])
+	qOffset += 2
 	return qOffset, nil
+}
+
+// checks if the name is compressed
+func nameCompressed(data []byte) bool {
+	return data[0] == 0xC0 // Compression pointer flag
+}
+
+func (answer *Answer) Decode(data []byte) (int, error) {
+	var aOffset int
+	aOffset = 0
+	if nameCompressed(data[aOffset:]) {
+		answer.Name = data[aOffset : aOffset+2] // Compression pointer
+		aOffset += 2
+	} else { // Uncompressed name
+		_, nameOffset, err := DecodeDomainName(data[aOffset:])
+		if err != nil {
+			return 0, err
+		}
+		answer.Name = data[aOffset : aOffset+nameOffset]
+		aOffset += nameOffset
+	}
+	answer.Type = binary.BigEndian.Uint16(data[aOffset : aOffset+2])
+	aOffset += 2
+	answer.Class = binary.BigEndian.Uint16(data[aOffset : aOffset+2])
+	aOffset += 2
+	answer.TTL = binary.BigEndian.Uint32(data[aOffset : aOffset+4])
+	aOffset += 4
+	answer.RDLength = binary.BigEndian.Uint16(data[aOffset : aOffset+2])
+	aOffset += 2
+	if answer.RDLength > 0 {
+		answer.RData = data[aOffset : aOffset+int(answer.RDLength)]
+		aOffset += int(answer.RDLength)
+	}
+	return aOffset, nil
+}
+
+func decodeAnswers(msg *Message, data []byte) int {
+	var aOffset int
+	for i := 0; i < int(msg.Header.ANCount); i++ {
+		answer := Answer{}
+		offset, err := answer.Decode(data[aOffset:])
+		if err != nil {
+			log.Fatal(err)
+			return 0
+		}
+		aOffset += offset
+		msg.Answers = append(msg.Answers, answer)
+	}
+	return aOffset
+}
+
+func decodeNS(msg *Message, data []byte) int {
+	var nsOffset int
+
+	for i := 0; i < int(msg.Header.NSCount); i++ {
+		answer := Answer{}
+		offset, err := answer.Decode(data[nsOffset:])
+		if err != nil {
+			log.Fatal(err)
+			return 0
+		}
+		nsOffset += offset
+		msg.Authority = append(msg.Authority, answer)
+	}
+	return nsOffset
+}
+
+func decodeAdditional(msg *Message, data []byte) int {
+	var aOffset int
+	for i := 0; i < int(msg.Header.ARCount); i++ {
+		answer := Answer{}
+		offset, err := answer.Decode(data[aOffset:])
+		if err != nil {
+			log.Fatal(err)
+			return 0
+		}
+		aOffset += offset
+		msg.Additional = append(msg.Additional, answer)
+	}
+	return aOffset
 }
 
 func (msg *Message) Decode(data []byte) (int, error) {
@@ -290,7 +418,25 @@ func (msg *Message) Decode(data []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	mSize := qOffset + hSize
+	// if message is response
+	if msg.Header.QR == 1 {
+		// if answers count is > 0
+		if msg.Header.ANCount > 0 {
+			anOffset := decodeAnswers(msg, data[mSize:])
+			mSize += anOffset
+		}
+		if msg.Header.NSCount > 0 {
+			nsOffset := decodeNS(msg, data[mSize:])
+			mSize += nsOffset
+		}
+	}
+	if msg.Header.ARCount > 0 {
+		adOffset := decodeAdditional(msg, data[mSize:])
+		mSize += adOffset
+	}
+
 	return mSize, nil
 }
 
@@ -305,7 +451,7 @@ func NewServer(address string) *Server {
 }
 
 func (s *Server) Run() {
-	buffer := make([]byte, 512)
+	buffer := make([]byte, BUFFER_SIZE)
 	udpAddr, err := net.ResolveUDPAddr("udp", s.address)
 	if err != nil {
 		log.Fatal(err)
@@ -327,58 +473,80 @@ func (s *Server) Run() {
 	}
 }
 
-func Proxy(data []byte, publicDNS string) []byte {
-	res := make([]byte, 512)
+func Proxy(data []byte, nameServer string) ([]byte, error) {
+	res := make([]byte, BUFFER_SIZE)
 
 	// Resolve the string address to a UDP address
-	udpAddr, err := net.ResolveUDPAddr("udp", publicDNS)
+	udpAddr, err := net.ResolveUDPAddr("udp", nameServer)
 	if err != nil {
 		fmt.Println(err)
-		os.Exit(1)
+		return nil, err
 	}
 
 	// Dial to the address with UDP
 	conn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
 		log.Println(err)
-		os.Exit(1)
+		return nil, err
 	}
 	defer conn.Close()
 
 	// Send a message to the server
 	_, err = conn.Write(data)
-	fmt.Println("send...")
 	if err != nil {
 		log.Println(err)
-		os.Exit(1)
+		return nil, err
 	}
 
 	// Read from the connection into the buffer
 	_, err = bufio.NewReader(conn).Read(res)
 	if err != nil {
 		log.Println(err)
-		return res
+		return res, nil
 	}
-	fmt.Println("read...")
-	return res
+	return res, nil
 }
 
-func (msg *Message) Lookup(nameServer string) []byte {
-	res := Proxy(msg.Bytes, nameServer)
+func (msg *Message) Resolve(nameServer string) error {
+	// fmt.Println("nameServer: ", nameServer)
+	var newNameServer string
+	res, err := Proxy(msg.Bytes, nameServer)
+	if err != nil {
+		return err
+	}
 	message := Message{}
 	message.Decode(res)
-	fmt.Printf("message: %+v\n", message)
-	return res
+	if message.Header.ANCount != 0 {
+		for _, answer := range message.Answers {
+			if answer.Type == uint16(msg.Question.QType) {
+				msg.Answers = append(msg.Answers, answer)
+			}
+		}
+	} else if message.Header.NSCount != 0 {
+		for _, additional := range message.Additional {
+			if additional.Type == uint16(TypeA) {
+				newNameServer = net.IPv4(additional.RData[0], additional.RData[1], additional.RData[2], additional.RData[3]).String() + ":53"
+				break
+			}
+		}
+		err = msg.Resolve(newNameServer)
+		if err != nil {
+			return err
+		}
+	}
+	msg.Header.QR = 1
+	msg.Header.RA = 1
+	return nil
 }
 
 func (msg *Message) BuildResponse() []byte {
 	var res []byte
-	var answers []byte
 
+	// msg.Additional = nil
+	msg.Authority = nil
+
+	msg.Header.RA = 1
 	zone := zones[msg.Question.DomainName]
-	fmt.Println("zone: ", zone)
-	fmt.Printf("%+v\n", zone)
-	fmt.Println("blocklist: ", blocklist[msg.Question.DomainName])
 	if blocklist[msg.Question.DomainName] {
 
 		msg.Header.ARCount = 0
@@ -400,14 +568,26 @@ func (msg *Message) BuildResponse() []byte {
 		answer.RData = encodeIP("127.0.0.1")
 		answer.RDLength = uint16(len(answer.RData))
 		msg.Answers = append(msg.Answers, answer)
-	} else if zone.Origin == "" && !blocklist[msg.Question.DomainName] {
-		fmt.Println("zone not found")
 
+	} else if val, ok := dnsCache.Get(msg.Question.DomainName); ok {
+		// check if the domain is in the cache
+
+		log.Printf("Cache hit for %s until %s\n", msg.Question.DomainName, val.Expiry.Format(time.RFC822))
+		msg.Answers = val.Answers
+		msg.Authority = val.Authority
+		msg.Additional = val.Additional
+
+	} else if zone.Origin == "" && !blocklist[msg.Question.DomainName] {
+
+		log.Printf("Cache miss for %s\n", msg.Question.DomainName)
 		nameServer := "198.41.0.4" + ":53"
-		// googleDNS := "8.8.8.8:53"
-		// cloudflareDNS := "1.1.1.1:53"
-		// return Proxy(msg.Bytes, googleDNS)
-		return msg.Lookup(nameServer)
+
+		err := msg.Resolve(nameServer)
+		dnsCache.Set(msg.Question.DomainName, *msg)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 	} else if zone.Origin != "" && !blocklist[msg.Question.DomainName] {
 		switch msg.Question.QType {
 		case TypeA:
@@ -434,21 +614,35 @@ func (msg *Message) BuildResponse() []byte {
 		msg.Header.ARCount = 0
 		msg.Header.QR = 1
 		msg.Header.ANCount = uint16(len(msg.Answers))
+
+		dnsCache.Set(msg.Question.DomainName, *msg)
 	}
 
+	msg.Header.QR = 1
+	msg.Header.ANCount = uint16(len(msg.Answers))
+	msg.Header.NSCount = uint16(len(msg.Authority))
+	msg.Header.ARCount = uint16(len(msg.Additional))
 	res = append(res, msg.Header.Encode()...)
 	res = append(res, msg.Question.Encode()...)
 
 	for _, answer := range msg.Answers {
-		answers = append(answers, answer.Encode(msg)...)
+		res = append(res, answer.Encode(msg)...)
 	}
-	res = append(res, answers...)
+	for _, answer := range msg.Authority {
+		res = append(res, answer.Encode(msg)...)
+	}
+	for _, answer := range msg.Additional {
+		res = append(res, answer.Encode(msg)...)
+	}
 	return res
 }
 
 func (s *Server) handle(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte) {
 	// log.Println(data)
 	msg := Message{}
+	// msg.Additional = make([]Answer, 0)
+	// msg.Answers = make([]Answer, 0)
+	// msg.Authority = make([]Answer, 0)
 	msg.Bytes = data
 	_, err := msg.Decode(data)
 	if err != nil {
