@@ -1,84 +1,81 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
+// DNS header size
+const (
+	hSize       = 12
+	BUFFER_SIZE = 2048
+)
+
+var dnsCache = RecordsCache{records: make(map[string]Message)}
+
+type ARecord struct {
+	Name  string `yaml:"name"`
+	Value string `yaml:"value"`
+	TTL   uint32 `yaml:"ttl"`
+}
+
 // Zone represents DNS zone data
 type Zone struct {
-	Origin string                   `yaml:"origin"`
 	SOA    map[string]interface{}   `yaml:"soa"`
+	Origin string                   `yaml:"origin"`
 	NS     []map[string]interface{} `yaml:"ns"`
-	A      []map[string]interface{} `yaml:"a"`
+	A      []ARecord                `yaml:"a"`
+	TTL    int                      `yaml:"ttl"`
 }
 
-// YAML Zone Provider
-type YAMLZoneProvider struct {
-	zones map[string]*Zone
-	mu    sync.RWMutex
-}
+var (
+	zones     = make(map[string]Zone)
+	blocklist = make(map[string]bool)
+)
 
-func NewYAMLZoneProvider() *YAMLZoneProvider {
-	return &YAMLZoneProvider{
-		zones: make(map[string]*Zone),
+func check(e error) {
+	if e != nil {
+		log.Fatal(e)
 	}
 }
 
-func (p *YAMLZoneProvider) GetZone(name string) (*Zone, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if zone, ok := p.zones[name]; ok {
-		return zone, nil
-	}
-	return nil, fmt.Errorf("zone not found: %s", name)
-}
-
-func (p *YAMLZoneProvider) Reload() error {
+func loadZones() {
 	files, err := filepath.Glob("zones/*.yml")
-	if err != nil {
-		return fmt.Errorf("failed to glob zone files: %v", err)
-	}
-
-	newZones := make(map[string]*Zone)
+	check(err)
 	for _, file := range files {
 		data, err := os.ReadFile(file)
-		if err != nil {
-			return fmt.Errorf("failed to read zone file %s: %v", file, err)
-		}
-
-		var zone Zone
-		if err := yaml.Unmarshal(data, &zone); err != nil {
-			return fmt.Errorf("failed to unmarshal zone file %s: %v", file, err)
-		}
-
-		// zone.SOA["serial"] = generateSOASerial()
-		newZones[zone.Origin] = &zone
+		check(err)
+		zone := Zone{}
+		yaml.Unmarshal(data, &zone)
+		name := zone.Origin
+		zones[name] = zone
 	}
-
-	p.mu.Lock()
-	p.zones = newZones
-	p.mu.Unlock()
-
-	return nil
+	fmt.Printf("%+v\n", zones)
 }
 
-// DNS Query Structures
-type Query struct {
-	Header   Header
-	Question Question
-	Answers  []Answer
+// DNS Message Structure
+type Message struct {
+	Expiry     time.Time
+	Bytes      []byte
+	Question   Question
+	Answers    []Answer
+	Authority  []Answer
+	Additional []Answer
+	Header     Header
 }
 
+// 16bits used for bit shifting
 type Header struct {
 	ID      uint16
 	QR      uint16 // Query/Response flag (false=query, true=response)
@@ -91,8 +88,8 @@ type Header struct {
 	RCODE   uint16 // Response code
 	QDCount uint16 // Question count
 	ANCount uint16 // Answer count
-	NSCount uint16 // Name servers count
-	ARCount uint16 // Authority count
+	NSCount uint16 // Authority records count
+	ARCount uint16 // Additional records count
 }
 
 // DNSQuestion represents a question in the DNS message
@@ -103,17 +100,18 @@ type Question struct {
 }
 
 type Answer struct {
+	RData    []byte
 	Name     []byte
+	TTL      uint32
 	Type     uint16
 	Class    uint16
-	TTL      uint32
 	RDLength uint16
-	RData    string
 }
 
-// Types and Constants
+// QType represents DNS query type
 type QType uint16
 
+// qtype enum
 const (
 	TypeA     QType = 1
 	TypeNS    QType = 2
@@ -133,397 +131,534 @@ const (
 	TypeTXT   QType = 16
 )
 
-var (
-	zoneData = make(map[string]*Zone)
-	qTypes   = []string{
-		"unknown",
-		"a",
-		"ns",
-		"md",
-		"mf",
-		"cname",
-		"soa",
-		"mb",
-		"mg",
-		"mr",
-		"null",
-		"wks",
-		"ptr",
-		"hinfo",
-		"minfo",
-		"mx",
-		"txt",
-	}
-)
-
-// Interfaces
-type DNSHandler interface {
-	Handle(msg *Query) (*Query, error)
+var types = map[QType]string{
+	TypeA:     "a",
+	TypeNS:    "ns",
+	TypeMD:    "md",
+	TypeMF:    "mf",
+	TypeCNAME: "cname",
+	TypeSOA:   "soa",
+	TypeMB:    "mb",
+	TypeMG:    "mg",
+	TypeMR:    "mr",
+	TypeNULL:  "null",
+	TypeWKS:   "wks",
+	TypePTR:   "ptr",
+	TypeHINFO: "hinfo",
+	TypeMINFO: "minfo",
+	TypeMX:    "mx",
+	TypeTXT:   "txt",
 }
 
-type ZoneProvider interface {
-	GetZone(domain string) (*Zone, error)
-	Reload() error
+type Cache interface {
+	Get(key string) (Message, bool)
+	Set(key string, msg Message)
+	Delete(key string)
 }
 
-type QueryEncoder interface {
-	Encode(msg *Query) ([]byte, error)
+type RecordsCache struct {
+	records map[string]Message
 }
 
-type QueryDecoder interface {
-	Decode(data []byte) (*Query, error)
-}
-
-// Handler factory
-type HandlerFactory struct {
-	zoneProvider ZoneProvider
-	handlers     map[QType]DNSHandler
-	mu           sync.RWMutex
-}
-
-func NewHandlerFactory(zp ZoneProvider) *HandlerFactory {
-	hf := &HandlerFactory{
-		zoneProvider: zp,
-		handlers:     make(map[QType]DNSHandler),
-	}
-	hf.Register(TypeA, NewARecordHandler(zp))
-	return hf
-}
-
-func (hf *HandlerFactory) Register(qtype QType, handler DNSHandler) {
-	hf.mu.Lock()
-	defer hf.mu.Unlock()
-	hf.handlers[qtype] = handler
-}
-
-func (hf *HandlerFactory) GetHandler(qtype QType) DNSHandler {
-	hf.mu.RLock()
-	defer hf.mu.RUnlock()
-	if handler, ok := hf.handlers[qtype]; ok {
-		return handler
-	}
-	return NewUnknownHandler()
-}
-
-// Record Handlers
-type ARecordHandler struct {
-	zoneProvider ZoneProvider
-}
-
-func NewARecordHandler(zp ZoneProvider) *ARecordHandler {
-	return &ARecordHandler{zoneProvider: zp}
-}
-
-func (h *ARecordHandler) Handle(query *Query) (*Query, error) {
-	zone, err := h.zoneProvider.GetZone(query.Question.DomainName)
-	if err != nil {
-		return query, err
-	}
-
-	query.Header.QR = 1 // Query or Response flag
-	query.Header.AA = 1 // Authoritative Answer flag
-	query.Header.ANCount = uint16(len(zone.A))
-
-	for _, record := range zone.A {
-
-		answer := Answer{
-			Name:     []byte(query.Question.DomainName),
-			Type:     uint16(TypeA),
-			Class:    1,
-			TTL:      uint32(record["ttl"].(int)),
-			RDLength: uint16(len(record["value"].(string))),
-			RData:    record["value"].(string),
+func (c *RecordsCache) Get(key string) (*Message, bool) {
+	if val, ok := c.records[key]; ok {
+		if val.Expiry.Before(time.Now()) {
+			delete(c.records, key)
+			return nil, false
 		}
-		query.Answers = append(query.Answers, answer)
+		return &val, ok
 	}
-	return query, nil
+	return nil, false
 }
 
-type UnknownHandler struct{}
-
-func NewUnknownHandler() *UnknownHandler {
-	return &UnknownHandler{}
+func (c *RecordsCache) Set(key string, msg Message) {
+	msg.Expiry = time.Now().Add(time.Duration(msg.Answers[0].TTL) * time.Second)
+	c.records[key] = msg
 }
 
-func (h *UnknownHandler) Handle(query *Query) (*Query, error) {
-	query.Header.RCODE = 4 // Not implemented
-	return query, nil
+func (c *RecordsCache) Delete(key string) {
+	delete(c.records, key)
 }
 
-// Message Encoder/Decoder
-type DefaultQueryEncoder struct{}
+type DomainName string
 
-func (e *DefaultQueryEncoder) Encode(query *Query) ([]byte, error) {
-	var res []byte
-	// Encode header
-	headerBytes := make([]byte, 12)
-
-	flags := uint16(query.Header.QR<<15 | query.Header.Opcode<<11 | query.Header.AA<<10 |
-		query.Header.TC<<9 | query.Header.RD<<8 | query.Header.RA<<7 | query.Header.Z<<4 | query.Header.RCODE)
-	binary.BigEndian.PutUint16(headerBytes[0:], query.Header.ID)
-	binary.BigEndian.PutUint16(headerBytes[2:], flags)
-	binary.BigEndian.PutUint16(headerBytes[4:], query.Header.QDCount)
-	binary.BigEndian.PutUint16(headerBytes[6:], query.Header.ANCount)
-	binary.BigEndian.PutUint16(headerBytes[8:], query.Header.NSCount)
-	binary.BigEndian.PutUint16(headerBytes[10:], query.Header.ARCount)
-	res = append(res, headerBytes...)
-
-	// Encode question
-	qname, err := EncodeDomainName(query.Question.DomainName)
-	if err != nil {
-		return nil, err
-	}
-
-	qt := make([]byte, 2)
-	binary.BigEndian.PutUint16(qt, uint16(query.Question.QType))
-	qc := make([]byte, 2)
-	binary.BigEndian.PutUint16(qc, query.Question.QClass)
-
-	res = append(res, qname...)
-	res = append(res, qt...)
-	res = append(res, qc...)
-
-	// Encode answers
-	for _, ans := range query.Answers {
-		answerBytes := encodeAnswer(ans)
-		res = append(res, answerBytes...)
-	}
-
-	return res, nil
-}
-
-// encode domain name in DNS wire format
-func EncodeDomainName(domain string) ([]byte, error) {
-	if domain == "" || domain == "." {
+// encode domain name to dns wire format
+func EncodeDomainName(dn string) ([]byte, error) {
+	if dn == "" || dn == "." {
 		return []byte{0}, nil
 	}
-	var domainBytes bytes.Buffer
-	domain = strings.TrimSuffix(domain, ".")
-	parts := strings.Split(domain, ".")
+	bytes := bytes.Buffer{}
+	dn = strings.TrimSuffix(dn, ".")
+	parts := strings.Split(dn, ".")
 	for _, part := range parts {
-		length := len(part)
-		if length > 63 {
-			return nil, fmt.Errorf("label exceeds maximum length of 63 octets")
+		if len(part) > 63 {
+			return nil, errors.New("label exceeds maximum length of 63 octets")
 		}
-		// Add length octet
-		domainBytes.WriteByte(byte(length))
-		// Add label
-		domainBytes.WriteString(part)
+
+		bytes.WriteByte(byte(len(part)))
+		bytes.WriteString(part)
 	}
-	// Add terminating zero octet for root label
-	domainBytes.WriteByte(0)
-	return domainBytes.Bytes(), nil
+	bytes.WriteByte(0)
+	return bytes.Bytes(), nil
 }
 
-func encodeAnswer(answer Answer) []byte {
+func DecodeDomainName(data []byte) (string, int, error) {
+	if len(data) == 1 && data[0] == 0 {
+		return ".", 0, nil
+	}
+	var dn string
+	i := 0
+	for data[i] != 0 {
+		length := int(data[i])
+		if i+length >= len(data) {
+			return "", 0, errors.New("invalid domain name")
+		}
+		dn += string(data[i+1:i+1+length]) + "."
+		i += length + 1
+	}
+	return dn, i + 1, nil
+}
+
+type Encoder interface {
+	Encode() []byte
+}
+
+func (header *Header) Encode() []byte {
+	headerBytes := make([]byte, hSize)
+	// Encoding logic here
+	flags := uint16(header.QR<<15 | header.Opcode<<11 | header.AA<<10 | header.TC<<9 | header.RD<<8 | header.RA<<7 | header.Z<<4 | header.RCODE)
+
+	binary.BigEndian.PutUint16(headerBytes, header.ID)
+	binary.BigEndian.PutUint16(headerBytes[2:], flags)
+	binary.BigEndian.PutUint16(headerBytes[4:], header.QDCount)
+	binary.BigEndian.PutUint16(headerBytes[6:], header.ANCount)
+	binary.BigEndian.PutUint16(headerBytes[8:], header.NSCount)
+	binary.BigEndian.PutUint16(headerBytes[10:], header.ARCount)
+	return headerBytes
+}
+
+func (question *Question) Encode() []byte {
+	var questionBytes []byte
+	// Encoding logic here
+	dn, err := EncodeDomainName(question.DomainName)
+	if err != nil {
+		return nil
+	}
+	temp16 := make([]byte, 2)
+	questionBytes = append(questionBytes, dn...)
+	binary.BigEndian.PutUint16(temp16, uint16(question.QType))
+	questionBytes = append(questionBytes, temp16...)
+	binary.BigEndian.PutUint16(temp16, uint16(question.QClass))
+	questionBytes = append(questionBytes, temp16...)
+	return questionBytes
+}
+
+func encodeIP(ip string) []byte {
+	ipBytes := net.ParseIP(ip)
+	if ipBytes == nil {
+		return nil
+	}
+	return ipBytes.To4()
+}
+
+func (answer *Answer) Encode(msg *Message) []byte {
 	var answerBytes []byte
-	name := make([]byte, 2)
-	binary.BigEndian.PutUint16(name, uint16(0xC00C))
-	answerBytes = append(answerBytes, name...)
 
-	typ := make([]byte, 2)
-	binary.BigEndian.PutUint16(typ, answer.Type)
-	answerBytes = append(answerBytes, typ...)
-
-	class := make([]byte, 2)
-	binary.BigEndian.PutUint16(class, answer.Class)
-	answerBytes = append(answerBytes, class...)
-
-	ttl := make([]byte, 4)
-	binary.BigEndian.PutUint32(ttl, answer.TTL)
-	answerBytes = append(answerBytes, ttl...)
-
-	rdlength := make([]byte, 2)
-	binary.BigEndian.PutUint16(rdlength, answer.RDLength)
-	answerBytes = append(answerBytes, rdlength...)
+	temp16 := make([]byte, 2)
+	temp32 := make([]byte, 4)
+	answerBytes = append(answerBytes, answer.Name...)
+	binary.BigEndian.PutUint16(temp16, answer.Type)
+	answerBytes = append(answerBytes, temp16...)
+	binary.BigEndian.PutUint16(temp16, answer.Class)
+	answerBytes = append(answerBytes, temp16...)
+	binary.BigEndian.PutUint32(temp32, answer.TTL)
+	answerBytes = append(answerBytes, temp32...)
+	binary.BigEndian.PutUint16(temp16, answer.RDLength)
+	answerBytes = append(answerBytes, temp16...)
 	answerBytes = append(answerBytes, answer.RData...)
-
 	return answerBytes
 }
 
-type (
-	DefaultQueryDecoder struct{}
-)
+func (msg *Message) Encode() []byte {
+	var msgBytes []byte
 
-func (d *DefaultQueryDecoder) Decode(data []byte) (*Query, error) {
-	if len(data) < 12 {
-		return nil, fmt.Errorf("message too short")
+	msgBytes = append(msgBytes, msg.Header.Encode()...)
+	msgBytes = append(msgBytes, msg.Question.Encode()...)
+	for _, answer := range msg.Answers {
+		msgBytes = append(msgBytes, answer.Encode(msg)...)
 	}
-	header, err := decodeHeader(data[:12])
-	if err != nil {
-		return nil, err
+	for _, answer := range msg.Authority {
+		msgBytes = append(msgBytes, answer.Encode(msg)...)
 	}
-	question, err := decodeQuestion(data[12:])
-	if err != nil {
-		return nil, err
+	for _, answer := range msg.Additional {
+		msgBytes = append(msgBytes, answer.Encode(msg)...)
 	}
-	return &Query{
-		Header:   *header,
-		Question: *question,
-	}, nil
+	return msgBytes
 }
 
-func decodeHeader(data []byte) (*Header, error) {
-	var header Header
+type Decoder interface {
+	Decode(data []byte)
+}
+
+func (header *Header) Decode(data []byte) error {
 	header.ID = binary.BigEndian.Uint16(data[0:2])
-	flags := binary.BigEndian.Uint16(data[2:4])
+	header.QR = binary.BigEndian.Uint16(data[2:4]) >> 15
+	header.Opcode = (binary.BigEndian.Uint16(data[2:4]) >> 11) & 0x0F
+	header.AA = (binary.BigEndian.Uint16(data[2:4]) >> 10) & 0x01
+	header.TC = (binary.BigEndian.Uint16(data[2:4]) >> 9) & 0x01
+	header.RD = (binary.BigEndian.Uint16(data[2:4]) >> 8) & 0x01
+	header.RA = (binary.BigEndian.Uint16(data[2:4]) >> 7) & 0x01
+	header.Z = (binary.BigEndian.Uint16(data[2:4]) >> 4) & 0x07
+	header.RCODE = binary.BigEndian.Uint16(data[2:4]) & 0x0F
 	header.QDCount = binary.BigEndian.Uint16(data[4:6])
 	header.ANCount = binary.BigEndian.Uint16(data[6:8])
 	header.NSCount = binary.BigEndian.Uint16(data[8:10])
 	header.ARCount = binary.BigEndian.Uint16(data[10:12])
-
-	header.QR = flags >> 15
-	header.Opcode = flags >> 11 & 0xF
-	header.AA = flags >> 10 & 0x1
-	header.TC = flags >> 9 & 0x1
-	header.RD = flags >> 8 & 0x1
-	header.RA = flags >> 7 & 0x1
-	header.Z = flags >> 4 & 0x7
-	header.RCODE = flags & 0xF
-	return &header, nil
-}
-
-func decodeQuestion(data []byte) (*Question, error) {
-	var question Question
-	var domainName string
-	i := 0
-	for data[i] != 0 {
-		length := int(data[i])
-		domainName += string(data[i+1:i+1+length]) + "."
-		i += length + 1
-	}
-	question.DomainName = domainName
-	question.QType = QType(binary.BigEndian.Uint16(data[i+1 : i+3]))
-	question.QClass = binary.BigEndian.Uint16(data[i+3 : i+5])
-	return &question, nil
-}
-
-func DecodeDomainName(data []byte) (string, error) {
-	if data[0] == 0 {
-		return ".", nil
-	}
-	i := 0
-	var domainName string
-	for data[i] != 0 {
-		length := int(data[i])
-		domainName += string(data[i+1:i+1+length]) + "."
-		i += length + 1
-	}
-	return domainName, nil
-}
-
-// Server
-type Server struct {
-	addr           string
-	handlerFactory *HandlerFactory
-	encoder        QueryEncoder
-	decoder        QueryDecoder
-}
-
-func NewServer(addr string, handlerFactory *HandlerFactory, encoder QueryEncoder, decoder QueryDecoder) *Server {
-	return &Server{
-		addr:           addr,
-		handlerFactory: handlerFactory,
-		encoder:        encoder,
-		decoder:        decoder,
-	}
-}
-
-func (s *Server) Run() error {
-	addr, err := net.ResolveUDPAddr("udp", s.addr)
-	if err != nil {
-		return fmt.Errorf("failed to resolve address: %v", err)
-	}
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return fmt.Errorf("failed to create listener: %v", err)
-	}
-	defer conn.Close()
-	log.Printf("DNS Server listening on %s", s.addr)
-	return s.serve(conn)
-}
-
-func (s *Server) serve(conn *net.UDPConn) error {
-	buffer := make([]byte, 1024)
-	for {
-		n, remoteAddr, err := conn.ReadFromUDP(buffer)
-		if err != nil {
-			log.Printf("Error reading UDP packet: %v", err)
-			continue
-		}
-		go s.handleRequest(conn, *remoteAddr, buffer[:n])
-	}
-}
-
-func (s *Server) handleRequest(conn *net.UDPConn, remoteAddr net.UDPAddr, data []byte) {
-	query, err := s.decoder.Decode(data)
-	if err != nil {
-		log.Printf("Error decoding message: %v", err)
-		return
-	}
-	handler := s.handlerFactory.GetHandler(query.Question.QType)
-	response, err := handler.Handle(query)
-	if err != nil {
-		log.Printf("Error handling message: %v", err)
-		return
-	}
-
-	resData, err := s.encoder.Encode(response)
-	if err != nil {
-		log.Printf("Error encoding response: %v", err)
-		return
-	}
-	if _, err := conn.WriteToUDP(resData, &remoteAddr); err != nil {
-		log.Printf("Error sending response: %v", err)
-		return
-	}
-}
-
-func loadZones() error {
-	files, err := filepath.Glob("zones/*.yml")
-	if err != nil {
-		return fmt.Errorf("failed to glob zone files: %v", err)
-	}
-
-	for _, file := range files {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return fmt.Errorf("failed to read zone file %s: %v", file, err)
-		}
-
-		var zone Zone
-		if err := yaml.Unmarshal(data, &zone); err != nil {
-			return fmt.Errorf("failed to unmarshal zone file %s: %v", file, err)
-		}
-
-		zoneData[zone.Origin] = &zone
-	}
 	return nil
 }
 
+func (question *Question) Decode(data []byte) (int, error) {
+	var qOffset int
+	dn, qOffset, err := DecodeDomainName(data)
+	if err != nil {
+		return 0, err
+	}
+	question.DomainName = dn
+	question.QType = QType(binary.BigEndian.Uint16(data[qOffset : qOffset+2]))
+	qOffset += 2
+	question.QClass = binary.BigEndian.Uint16(data[qOffset : qOffset+2])
+	qOffset += 2
+	return qOffset, nil
+}
+
+// checks if the name is compressed
+func nameCompressed(data []byte) bool {
+	return data[0] == 0xC0 // Compression pointer flag
+}
+
+func (answer *Answer) Decode(data []byte) (int, error) {
+	var aOffset int
+	aOffset = 0
+	if nameCompressed(data[aOffset:]) {
+		answer.Name = data[aOffset : aOffset+2] // Compression pointer
+		aOffset += 2
+	} else { // Uncompressed name
+		_, nameOffset, err := DecodeDomainName(data[aOffset:])
+		if err != nil {
+			return 0, err
+		}
+		answer.Name = data[aOffset : aOffset+nameOffset]
+		aOffset += nameOffset
+	}
+	answer.Type = binary.BigEndian.Uint16(data[aOffset : aOffset+2])
+	aOffset += 2
+	answer.Class = binary.BigEndian.Uint16(data[aOffset : aOffset+2])
+	aOffset += 2
+	answer.TTL = binary.BigEndian.Uint32(data[aOffset : aOffset+4])
+	aOffset += 4
+	answer.RDLength = binary.BigEndian.Uint16(data[aOffset : aOffset+2])
+	aOffset += 2
+	if answer.RDLength > 0 {
+		answer.RData = data[aOffset : aOffset+int(answer.RDLength)]
+		aOffset += int(answer.RDLength)
+	}
+	return aOffset, nil
+}
+
+func decodeAnswers(msg *Message, data []byte) int {
+	var aOffset int
+	for i := 0; i < int(msg.Header.ANCount); i++ {
+		answer := Answer{}
+		offset, err := answer.Decode(data[aOffset:])
+		if err != nil {
+			log.Fatal(err)
+			return 0
+		}
+		aOffset += offset
+		msg.Answers = append(msg.Answers, answer)
+	}
+	return aOffset
+}
+
+func decodeNS(msg *Message, data []byte) int {
+	var nsOffset int
+
+	for i := 0; i < int(msg.Header.NSCount); i++ {
+		answer := Answer{}
+		offset, err := answer.Decode(data[nsOffset:])
+		if err != nil {
+			log.Fatal(err)
+			return 0
+		}
+		nsOffset += offset
+		msg.Authority = append(msg.Authority, answer)
+	}
+	return nsOffset
+}
+
+func decodeAdditional(msg *Message, data []byte) int {
+	var aOffset int
+	for i := 0; i < int(msg.Header.ARCount); i++ {
+		answer := Answer{}
+		offset, err := answer.Decode(data[aOffset:])
+		if err != nil {
+			log.Fatal(err)
+			return 0
+		}
+		aOffset += offset
+		msg.Additional = append(msg.Additional, answer)
+	}
+	return aOffset
+}
+
+func (msg *Message) Decode(data []byte) (int, error) {
+	// Decoding logic here
+	err := msg.Header.Decode(data[:hSize])
+	qOffset, err := msg.Question.Decode(data[hSize:])
+	if err != nil {
+		return 0, err
+	}
+
+	mSize := qOffset + hSize
+	// if message is response
+	if msg.Header.QR == 1 {
+		// if answers count is > 0
+		if msg.Header.ANCount > 0 {
+			anOffset := decodeAnswers(msg, data[mSize:])
+			mSize += anOffset
+		}
+		if msg.Header.NSCount > 0 {
+			nsOffset := decodeNS(msg, data[mSize:])
+			mSize += nsOffset
+		}
+	}
+	if msg.Header.ARCount > 0 {
+		adOffset := decodeAdditional(msg, data[mSize:])
+		mSize += adOffset
+	}
+
+	return mSize, nil
+}
+
+type Server struct {
+	address string
+}
+
+func NewServer(address string) *Server {
+	return &Server{
+		address: address,
+	}
+}
+
+func (s *Server) Run() {
+	buffer := make([]byte, BUFFER_SIZE)
+	udpAddr, err := net.ResolveUDPAddr("udp", s.address)
+	if err != nil {
+		log.Fatal(err)
+	}
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("DNS Server running on ", s.address)
+	defer conn.Close()
+	for {
+		n, remoteAddr, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("Received", n, "bytes")
+		log.Println("from: ", remoteAddr)
+		go s.handle(conn, remoteAddr, buffer[:n])
+	}
+}
+
+func Proxy(data []byte, nameServer string) ([]byte, error) {
+	res := make([]byte, BUFFER_SIZE)
+
+	// Resolve the string address to a UDP address
+	udpAddr, err := net.ResolveUDPAddr("udp", nameServer)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+
+	// Dial to the address with UDP
+	conn, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+	defer conn.Close()
+
+	// Send a message to the server
+	_, err = conn.Write(data)
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+
+	// Read from the connection into the buffer
+	_, err = bufio.NewReader(conn).Read(res)
+	if err != nil {
+		log.Println(err)
+		return res, nil
+	}
+	return res, nil
+}
+
+func (msg *Message) Resolve(nameServer string) error {
+	// fmt.Println("nameServer: ", nameServer)
+	var newNameServer string
+	res, err := Proxy(msg.Bytes, nameServer)
+	if err != nil {
+		return err
+	}
+	message := Message{}
+	message.Decode(res)
+	if message.Header.ANCount != 0 {
+		for _, answer := range message.Answers {
+			if answer.Type == uint16(msg.Question.QType) {
+				msg.Answers = append(msg.Answers, answer)
+			}
+		}
+	} else if message.Header.NSCount != 0 {
+		for _, additional := range message.Additional {
+			if additional.Type == uint16(TypeA) {
+				newNameServer = net.IPv4(additional.RData[0], additional.RData[1], additional.RData[2], additional.RData[3]).String() + ":53"
+				break
+			}
+		}
+		err = msg.Resolve(newNameServer)
+		if err != nil {
+			return err
+		}
+	}
+	msg.Header.QR = 1
+	msg.Header.RA = 1
+	return nil
+}
+
+func (msg *Message) BuildResponse() []byte {
+	var res []byte
+
+	// msg.Additional = nil
+	msg.Authority = nil
+
+	msg.Header.RA = 1
+	zone := zones[msg.Question.DomainName]
+	if blocklist[msg.Question.DomainName] {
+
+		msg.Header.ARCount = 0
+		msg.Header.QR = 1
+		msg.Header.ANCount = 1
+
+		answer := Answer{}
+
+		// TODO: check if record.Name is "@"...
+		name, err := EncodeDomainName(msg.Question.DomainName)
+		if err != nil {
+			return nil
+		}
+		answer.Name = name
+		answer.Type = uint16(msg.Question.QType)
+		answer.Class = uint16(msg.Question.QClass)
+		// answer.TTL = record.TTL
+		answer.TTL = uint32(0)
+		answer.RData = encodeIP("127.0.0.1")
+		answer.RDLength = uint16(len(answer.RData))
+		msg.Answers = append(msg.Answers, answer)
+
+	} else if val, ok := dnsCache.Get(msg.Question.DomainName); ok {
+		// check if the domain is in the cache
+
+		log.Printf("Cache hit for %s until %s\n", msg.Question.DomainName, val.Expiry.Format(time.RFC822))
+		msg.Answers = val.Answers
+		msg.Authority = val.Authority
+		msg.Additional = val.Additional
+
+	} else if zone.Origin == "" && !blocklist[msg.Question.DomainName] {
+
+		log.Printf("Cache miss for %s\n", msg.Question.DomainName)
+		nameServer := "198.41.0.4" + ":53"
+
+		err := msg.Resolve(nameServer)
+		dnsCache.Set(msg.Question.DomainName, *msg)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+	} else if zone.Origin != "" && !blocklist[msg.Question.DomainName] {
+		switch msg.Question.QType {
+		case TypeA:
+			for _, record := range zone.A {
+				answer := Answer{}
+
+				// TODO: check if record.Name is "@"...
+				name, err := EncodeDomainName(msg.Question.DomainName)
+				if err != nil {
+					return nil
+				}
+				answer.Name = name
+				answer.Type = uint16(msg.Question.QType)
+				answer.Class = uint16(msg.Question.QClass)
+				// answer.TTL = record.TTL
+				answer.TTL = uint32(0)
+				answer.RData = encodeIP(record.Value)
+				answer.RDLength = uint16(len(answer.RData))
+				msg.Answers = append(msg.Answers, answer)
+			}
+		default:
+		}
+
+		msg.Header.ARCount = 0
+		msg.Header.QR = 1
+		msg.Header.ANCount = uint16(len(msg.Answers))
+
+		dnsCache.Set(msg.Question.DomainName, *msg)
+	}
+
+	msg.Header.QR = 1
+	msg.Header.ANCount = uint16(len(msg.Answers))
+	msg.Header.NSCount = uint16(len(msg.Authority))
+	msg.Header.ARCount = uint16(len(msg.Additional))
+	res = append(res, msg.Header.Encode()...)
+	res = append(res, msg.Question.Encode()...)
+
+	for _, answer := range msg.Answers {
+		res = append(res, answer.Encode(msg)...)
+	}
+	for _, answer := range msg.Authority {
+		res = append(res, answer.Encode(msg)...)
+	}
+	for _, answer := range msg.Additional {
+		res = append(res, answer.Encode(msg)...)
+	}
+	return res
+}
+
+func (s *Server) handle(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte) {
+	// log.Println(data)
+	msg := Message{}
+	// msg.Additional = make([]Answer, 0)
+	// msg.Answers = make([]Answer, 0)
+	// msg.Authority = make([]Answer, 0)
+	msg.Bytes = data
+	_, err := msg.Decode(data)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	res := msg.BuildResponse()
+	conn.WriteToUDP(res, remoteAddr)
+}
+
 func main() {
-	// if err := loadZones(); err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
-	// fmt.Println(zoneData)
-	// for k, v := range zoneData {
-	// 	fmt.Println(k, v)
-	// }
-
-	// Create dependencies
-	zoneProvider := NewYAMLZoneProvider()
-	if err := zoneProvider.Reload(); err != nil {
-		log.Fatalf("Failed to load zones: %v", err)
-	}
-
-	handlerFactory := NewHandlerFactory(zoneProvider)
-	encoder := &DefaultQueryEncoder{}
-	decoder := &DefaultQueryDecoder{}
-
-	// Create and run server
-	server := NewServer(":53153", handlerFactory, encoder, decoder)
-	if err := server.Run(); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
+	loadZones()
+	// loadBlocklist()
+	blocklist["google.com."] = true
+	server := NewServer(
+		"127.0.0.1:53153",
+	)
+	server.Run()
 }

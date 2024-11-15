@@ -9,9 +9,9 @@ func TestEncodeDomain(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
+		errMsg  string
 		want    []byte
 		wantErr bool
-		errMsg  string
 	}{
 		{
 			name:    "simple domain",
@@ -94,9 +94,9 @@ func TestDecodeDomain(t *testing.T) {
 	tests := []struct {
 		name    string
 		want    string
+		errMsg  string
 		input   []byte
 		wantErr bool
-		errMsg  string
 	}{
 		{
 			name:    "simple domain",
@@ -132,7 +132,7 @@ func TestDecodeDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := DecodeDomainName(tt.input)
+			got, _, err := DecodeDomainName(tt.input)
 
 			// Check error cases
 			if (err != nil) != tt.wantErr {

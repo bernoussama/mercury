@@ -13,7 +13,7 @@ ns:
   - host: ns2.bernoussama.com.
 a:
   - name: "@"
-    ttl: 400
+    ttl: 5
     value: 255.255.255.255
   - name: "@"
     ttl: 400
