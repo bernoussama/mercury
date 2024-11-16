@@ -1,10 +1,8 @@
-package main
+package dns
 
 import (
 	"bytes"
 	"testing"
-
-	"github.com/bernoussama/mercury/dns"
 )
 
 func TestEncodeDomain(t *testing.T) {
@@ -69,7 +67,7 @@ func TestEncodeDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := dns.EncodeDomainName(tt.input)
+			got, err := EncodeDomainName(tt.input)
 
 			// Check error cases
 			if (err != nil) != tt.wantErr {
@@ -134,7 +132,7 @@ func TestDecodeDomain(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, _, err := dns.DecodeDomainName(tt.input)
+			got, _, err := DecodeDomainName(tt.input)
 
 			// Check error cases
 			if (err != nil) != tt.wantErr {
