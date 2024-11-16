@@ -6,6 +6,7 @@ Mercury is a light DNS server implementation from scratch in Go
 - Authoritative server for your own zones.
 - DNS sinkhole - (dns-level ad-block)
 - Caches DNS queries
+- Handles concurrent clients
 
 [//]: # (## Why?)
 
