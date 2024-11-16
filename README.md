@@ -21,4 +21,5 @@ git clone github.com/bernoussama/mercury
 
 ## 👏 Contributing
 Comments and pull requests are welcome and encouraged.
+
 You can contribute by forking the repo and opening pull requests.
