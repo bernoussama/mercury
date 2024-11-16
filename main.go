@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -150,17 +151,22 @@ var types = map[QType]string{
 	TypeTXT:   "txt",
 }
 
-type Cache interface {
-	Get(key string) (Message, bool)
-	Set(key string, msg Message)
+type Cache[T any] interface {
+	Get(key string) (T, bool)
+	Set(key string, msg T, ttl uint32)
 	Delete(key string)
+	Invalidate()
 }
 
 type RecordsCache struct {
 	records map[string]Message
+	mu      sync.RWMutex
 }
 
 func (c *RecordsCache) Get(key string) (*Message, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	if val, ok := c.records[key]; ok {
 		if val.Expiry.Before(time.Now()) {
 			delete(c.records, key)
@@ -171,12 +177,17 @@ func (c *RecordsCache) Get(key string) (*Message, bool) {
 	return nil, false
 }
 
-func (c *RecordsCache) Set(key string, msg Message) {
-	msg.Expiry = time.Now().Add(time.Duration(msg.Answers[0].TTL) * time.Second)
+func (c *RecordsCache) Set(key string, msg Message, ttl uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	msg.Expiry = time.Now().Add(time.Duration(ttl) * time.Second)
 	c.records[key] = msg
 }
 
 func (c *RecordsCache) Delete(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	delete(c.records, key)
 }
 
@@ -583,7 +594,7 @@ func (msg *Message) BuildResponse() []byte {
 		nameServer := "198.41.0.4" + ":53"
 
 		err := msg.Resolve(nameServer)
-		dnsCache.Set(msg.Question.DomainName, *msg)
+		dnsCache.Set(msg.Question.DomainName, *msg, msg.Answers[0].TTL)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -615,7 +626,7 @@ func (msg *Message) BuildResponse() []byte {
 		msg.Header.QR = 1
 		msg.Header.ANCount = uint16(len(msg.Answers))
 
-		dnsCache.Set(msg.Question.DomainName, *msg)
+		dnsCache.Set(msg.Question.DomainName, *msg, msg.Answers[0].TTL)
 	}
 
 	msg.Header.QR = 1

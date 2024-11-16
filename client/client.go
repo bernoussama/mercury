@@ -1,49 +1,92 @@
-package main
+package client
 
 import (
-	"bufio"
-	"fmt"
+	"log"
 	"net"
-	"os"
+	"sync"
+
+	"golang.org/x/exp/rand"
+)
+
+const (
+	BUFFER_SIZE = 512
 )
 
 func main() {
-	// Resolve the string address to a UDP address
-	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:53153")
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-
-	// Dial to the address with UDP
-	conn, err := net.DialUDP("udp", nil, udpAddr)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-
-	for i := range 10 {
-		go sendQuery(conn, "Hello UDP Server\n", i)
-	}
+	go runConcurrentClientTests(10)
+	select {}
 }
 
-func sendQuery(conn *net.UDPConn, query string, i int) {
-	// Send a message to the server
-	fmt.Println("send...", i)
-	_, err := conn.Write([]byte(query))
-	fmt.Println("send...")
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+func runConcurrentClientTests(numClients int) {
+	const numRequestsPerClient = 5
+
+	var wg sync.WaitGroup
+	wg.Add(numClients)
+
+	for i := 0; i < numClients; i++ {
+		go func(clientID int) {
+			defer wg.Done()
+			for j := 0; j < numRequestsPerClient; j++ {
+				sendTestQuery(clientID, j)
+			}
+		}(i)
 	}
 
-	// Read from the connection untill a new line is send
-	data, err := bufio.NewReader(conn).ReadString('\n')
+	wg.Wait()
+}
+
+func sendTestQuery(clientID, requestID int) {
+	conn, err := net.Dial("udp", "127.0.0.1:53153")
 	if err != nil {
-		fmt.Println(err)
+		log.Printf("Client %d: Failed to connect: %v\n", clientID, err)
+		return
+	}
+	defer conn.Close()
+
+	query := buildTestQuery("example.com")
+	_, err = conn.Write(query)
+	if err != nil {
+		log.Printf("Client %d: Failed to send query %d: %v\n", clientID, requestID, err)
 		return
 	}
 
-	// Print the data read from the connection to the terminal
-	fmt.Print("> ", string(data))
+	buffer := make([]byte, BUFFER_SIZE)
+	_, err = conn.Read(buffer)
+	if err != nil {
+		log.Printf("Client %d: Failed to read response for query %d: %v\n", clientID, requestID, err)
+		return
+	}
+
+	log.Printf("Client %d: Received response for query %d\n", clientID, requestID)
+}
+
+func buildTestQuery(domain string) []byte {
+	header := Header{
+		ID:      uint16(rand.Intn(65535)),
+		QR:      0,
+		Opcode:  0,
+		AA:      0,
+		TC:      0,
+		RD:      1,
+		RA:      0,
+		Z:       0,
+		RCODE:   0,
+		QDCount: 1,
+		ANCount: 0,
+		NSCount: 0,
+		ARCount: 0,
+	}
+
+	question := Question{
+		DomainName: domain,
+		QType:      TypeA,
+		QClass:     1,
+	}
+
+	msg := Message{
+		Header:   header,
+		Question: question,
+	}
+
+	return msg.Encode()
 }
