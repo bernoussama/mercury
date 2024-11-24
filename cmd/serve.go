@@ -63,7 +63,7 @@ func check(e error) {
 }
 
 func loadZones() {
-	files, err := filepath.Glob("zones/*.yml")
+	files, err := filepath.Glob("/opt/mercury/zones/*.yml")
 	check(err)
 	for _, file := range files {
 		data, err := os.ReadFile(file)
@@ -138,7 +138,10 @@ This server is designed to be used as as recursive resolver and a sinkhole, bloc
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("serve called")
 		fmt.Println(Zone)
-		address := "0.0.0.0:53153"
+
+		ip := "0.0.0.0"
+		port := ":53153"
+		address := ip + port
 		if Zone {
 			loadZones()
 		}

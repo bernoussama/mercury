@@ -1,9 +1,8 @@
 services:
   mercury:
     image: ghcr.io/bernoussama/mercury:latest
-    environment:
-      - PORT=53153
     ports:
-      - "${PORT}:53"
+      - "${PORT}:53153/udp"
+      - "${PORT}:53153/tcp"
     volumes:
-      - ./zones:/zones
+      - ./zones:/opt/mercury/zones

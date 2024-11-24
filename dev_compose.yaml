@@ -3,9 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "${PORT}:53"
     environment:
       - PORT=53153
+    ports:
+      - "${PORT}:53153/udp"
+      - "${PORT}:53153/tcp"
     volumes:
-      - ./zones:/zones
+      - ./zones:/opt/mercury/zones
