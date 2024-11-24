@@ -16,15 +16,28 @@ Mercury is a light DNS server implementation from scratch in Go
 
 ### Install
 
-```bash
-wget -qO- https://raw.githubusercontent.com/bernoussama/mercury/main/install.sh | bash
+#### Docker compose:
+
+(compose file)[./compose.yaml]
+
+```yaml
+services:
+  mercury:
+    image: ghcr.io/bernoussama/mercury:latest
+    ports:
+      - "${PORT}:53153/udp"
+      - "${PORT}:53153/tcp"
+    volumes:
+      - ./zones:/opt/mercury/zones
 ```
 
-OR
-
 ```bash
-curl -fsSl https://raw.githubusercontent.com/bernoussama/mercury/main/install.sh | bash
+PORT=53 docker compose up -d
 ```
+
+### systemd service
+
+> WIP
 
 - clone the repo
 
