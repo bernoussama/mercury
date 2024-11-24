@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var Verbose bool
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "mercury",
@@ -40,6 +42,8 @@ func Execute() {
 }
 
 func init() {
+	verbose := os.Getenv("VERBOSE") != ""
+	rootCmd.PersistentFlags().BoolVarP(&Verbose, "verbose", "v", verbose, "verbose output")
 	// Here you will define your flags and configuration settings.
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.

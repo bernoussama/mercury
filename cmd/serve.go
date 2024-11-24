@@ -15,6 +15,36 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// Logln is a wrapper around log.Println that only prints if Verbose is true
+func Logln(a ...any) {
+	if Verbose {
+		log.Println(a...)
+	}
+}
+
+// Logf is a wrapper around log.Printf that only prints if Verbose is true
+func Logf(format string, a ...any) {
+	if Verbose {
+		log.Printf(format, a...)
+	}
+}
+
+// Printf is a wrapper around fmt.Printf that only prints if Verbose is true
+func Printf(format string, a ...any) (n int, err error) {
+	if Verbose {
+		return fmt.Printf(format, a...)
+	}
+	return 0, nil
+}
+
+// Println is a wrapper around fmt.Println that only prints if Verbose is true
+func Println(a ...any) (n int, err error) {
+	if Verbose {
+		return fmt.Println(a...)
+	}
+	return 0, nil
+}
+
 // DNS header size
 const BUFFER_SIZE = 2048
 
@@ -43,7 +73,7 @@ func loadZones() {
 		name := zone.Origin
 		zones[name] = zone
 	}
-	fmt.Printf("%+v\n", zones)
+	Printf("%+v\n", zones)
 }
 
 type Server struct {
@@ -73,8 +103,8 @@ func (s *Server) Run() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Println("Received", n, "bytes")
-		log.Println("from: ", remoteAddr)
+		Logln("Received", n, "bytes")
+		Logln("from: ", remoteAddr)
 		go s.handle(conn, remoteAddr, buffer[:n])
 	}
 }
@@ -92,18 +122,30 @@ func (s *Server) handle(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte)
 	conn.WriteToUDP(res, remoteAddr)
 }
 
+var (
+	Zone     bool
+	Sinkhole bool
+	Source   string
+)
+
 // serveCmd represents the serve command
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "serve a dns queries",
+	Short: "serve dns queries",
 	Long: `Mercury is a lightweight DNS server that provides DNS resolution for a given set of zones.
 This server is designed to be used as as recursive resolver and a sinkhole, blocking unwanted DNS requests.`,
+
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("serve called")
+		fmt.Println(Zone)
 		address := "0.0.0.0:53153"
-		loadZones()
-		// loadBlocklist()
-		blocklist["google.com."] = true
+		if Zone {
+			loadZones()
+		}
+		if Sinkhole {
+			// loadBlocklist()
+			blocklist["google.com."] = true
+		}
 		server := NewServer(
 			address,
 		)
@@ -112,6 +154,11 @@ This server is designed to be used as as recursive resolver and a sinkhole, bloc
 }
 
 func init() {
+	zone := os.Getenv("ZONE") != ""
+	sinkhole := os.Getenv("SINKHOLE") != ""
+	rootCmd.PersistentFlags().BoolVarP(&Zone, "zone", "z", zone, "authoritative zone")
+	rootCmd.PersistentFlags().BoolVarP(&Sinkhole, "sinkhole", "s", sinkhole, "dns sinkhole")
+
 	rootCmd.AddCommand(serveCmd)
 
 	// Here you will define your flags and configuration settings.
