@@ -20,8 +20,10 @@ Mercury is a light DNS server implementation from scratch in Go
 wget -qO- https://raw.githubusercontent.com/bernoussama/mercury/main/install.sh | bash
 ```
 
-```
+OR
 
+```bash
+curl -fsSl https://raw.githubusercontent.com/bernoussama/mercury/main/install.sh | bash
 ```
 
 - clone the repo

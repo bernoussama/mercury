@@ -9,6 +9,7 @@ compose="compose.yaml"
 curl --fail --location --progress-bar --output "$compose" "$compose_uri" ||
   error "Failed to download bun from \"$compose_uri\""
 
+echo "downloaded mercury image"
 read -p "port: " PORT
 export PORT
 
