@@ -31,4 +31,4 @@ EXPOSE 53/tcp
 
 USER nonroot:nonroot
 
-ENTRYPOINT ["/mercury"]
+ENTRYPOINT ["/mercury", "serve"]

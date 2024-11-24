@@ -12,13 +12,19 @@ import (
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "mercury",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
+	Short: "Lightweight DNS server",
+	Long: `Mercury is a lightweight DNS server that provides DNS resolution for a given set of zones.
+This server is designed to be used as as recursive resolver and a sinkhole, blocking unwanted DNS requests.
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+Features:
+- Support for multiple zones
+- Recursive resolver
+- Blocklist for unwanted domains
+- Simple and easy to use command-line interface
+
+Example usage:
+$ mercury serve
+`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	// Run: func(cmd *cobra.Command, args []string) { },
