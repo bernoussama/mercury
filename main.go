@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/bernoussama/mercury/cmd"
 	"github.com/bernoussama/mercury/dns"
 	"gopkg.in/yaml.v3"
 )
@@ -89,6 +90,7 @@ func (s *Server) handle(conn *net.UDPConn, remoteAddr *net.UDPAddr, data []byte)
 }
 
 func main() {
+	cmd.Execute()
 	loadZones()
 	// loadBlocklist()
 	blocklist["google.com."] = true
