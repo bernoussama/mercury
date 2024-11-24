@@ -1,11 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
 mkdir -p ~/mercury/zones
 cd ~/mercury
 
-# wget https://raw.githubusercontent.com/bernoussama/mercury/main/zones/example.yml -O zones/example.yml;
-wget https://raw.githubusercontent.com/bernoussama/mercury/main/compose.yaml -O compose.yaml
+compose_uri="https://raw.githubusercontent.com/bernoussama/mercury/main/compose.yaml"
+compose="compose.yaml"
+curl --fail --location --progress-bar --output "$compose" "$compose_uri" ||
+  error "Failed to download bun from \"$compose_uri\""
 
 read -p "port: " PORT
 export PORT

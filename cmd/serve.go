@@ -100,7 +100,7 @@ var serveCmd = &cobra.Command{
 This server is designed to be used as as recursive resolver and a sinkhole, blocking unwanted DNS requests.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Println("serve called")
-		address := "127.0.0.1:53153"
+		address := "0.0.0.0:53153"
 		loadZones()
 		// loadBlocklist()
 		blocklist["google.com."] = true

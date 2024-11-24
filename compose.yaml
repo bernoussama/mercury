@@ -1,9 +1,9 @@
 services:
   mercury:
     image: ghcr.io/bernoussama/mercury:latest
-    ports:
-      - "${PORT}:53"
     environment:
       - PORT=53153
+    ports:
+      - "${PORT}:53"
     volumes:
       - ./zones:/zones
