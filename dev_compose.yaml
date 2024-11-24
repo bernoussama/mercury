@@ -1,6 +1,8 @@
 services:
   mercury:
-    image: ghcr.io/bernoussama/mercury:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "${PORT}:53"
     environment:
