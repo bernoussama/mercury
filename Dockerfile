@@ -8,6 +8,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
+# Copy the source code
 COPY *.go ./
 COPY cmd/ cmd/
 COPY dns/ dns/
