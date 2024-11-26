@@ -18,7 +18,7 @@ Mercury is a light DNS server implementation from scratch in Go
 
 #### Docker compose:
 
-
+- `compose.yaml`
 ```yaml
 services:
   mercury:
@@ -30,6 +30,7 @@ services:
       - ./zones:/opt/mercury/zones
 ```
 
+- run the container in the background
 ```bash
 PORT=53 docker compose up -d
 ```
