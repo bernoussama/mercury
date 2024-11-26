@@ -38,13 +38,6 @@ PORT=53 docker compose up -d
 
 > WIP
 
-- clone the repo
-
-```bash
-git clone github.com/bernoussama/mercury
-```
-
-> docker container is **WIP**
 
 ## ⚙️ Usage
 
