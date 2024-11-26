@@ -18,7 +18,6 @@ Mercury is a light DNS server implementation from scratch in Go
 
 #### Docker compose:
 
-(compose file)[./compose.yaml]
 
 ```yaml
 services:
