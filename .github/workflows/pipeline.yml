@@ -1,12 +1,11 @@
 name: pipeline
 on:
+  pull_request:
   push:
-    branches:
-      - "main"
-    paths-ignore:
-      - '**.md'
     tags:
       - "*"
+    paths-ignore:
+      - '**.md'
 
 jobs:
   run-tests:
