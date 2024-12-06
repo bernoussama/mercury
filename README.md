@@ -13,7 +13,6 @@ Mercury is a light DNS server implementation from scratch in Go
 [//]: # "## Why?"
 
 ## 🚀 Quick Start
-
 ### Install
 
 #### Docker compose:
@@ -41,7 +40,15 @@ PORT=53 docker compose up -d
 
 
 ## ⚙️ Usage
+> ⚠️ still in development
 
+if you want to use just send dns requests to the server
+
+example:
+```bash
+dig google.com @server-ip -p 53
+```
+ 
 > cli comming soon
 
 ## 👏 Contributing
