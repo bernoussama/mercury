@@ -138,12 +138,12 @@ func (header *Header) Encode() []byte {
 }
 
 func (question *Question) Encode() []byte {
-	var questionBytes []byte
 	// Encoding logic here
 	dn, err := EncodeDomainName(question.DomainName)
 	if err != nil {
 		return nil
 	}
+	questionBytes := make([]byte, 0, len(dn)+4)
 	temp16 := make([]byte, 2)
 	questionBytes = append(questionBytes, dn...)
 	binary.BigEndian.PutUint16(temp16, uint16(question.QType))
@@ -162,7 +162,7 @@ func encodeIP(ip string) []byte {
 }
 
 func (answer *Answer) Encode(msg *Message) []byte {
-	var answerBytes []byte
+	answerBytes := make([]byte, 0, len(answer.Name)+10+len(answer.RData))
 
 	temp16 := make([]byte, 2)
 	temp32 := make([]byte, 4)
@@ -180,10 +180,21 @@ func (answer *Answer) Encode(msg *Message) []byte {
 }
 
 func (msg *Message) Encode() []byte {
-	var msgBytes []byte
-
-	msgBytes = append(msgBytes, msg.Header.Encode()...)
-	msgBytes = append(msgBytes, msg.Question.Encode()...)
+	headerBytes := msg.Header.Encode()
+	questionBytes := msg.Question.Encode()
+	cap := len(headerBytes) + len(questionBytes)
+	for _, answer := range msg.Answers {
+		cap += len(answer.Name) + 10 + len(answer.RData)
+	}
+	for _, answer := range msg.Authority {
+		cap += len(answer.Name) + 10 + len(answer.RData)
+	}
+	for _, answer := range msg.Additional {
+		cap += len(answer.Name) + 10 + len(answer.RData)
+	}
+	msgBytes := make([]byte, 0, cap)
+	msgBytes = append(msgBytes, headerBytes...)
+	msgBytes = append(msgBytes, questionBytes...)
 	for _, answer := range msg.Answers {
 		msgBytes = append(msgBytes, answer.Encode(msg)...)
 	}
@@ -407,8 +418,6 @@ func (msg *Message) Resolve(nameServer string) error {
 }
 
 func (msg *Message) BuildResponse(zones map[string]Zone, dnsCache cache.Cache[Message], blocklist map[string]bool) []byte {
-	var res []byte
-
 	// msg.Additional = nil
 	msg.Authority = nil
 
@@ -489,8 +498,21 @@ func (msg *Message) BuildResponse(zones map[string]Zone, dnsCache cache.Cache[Me
 	msg.Header.ANCount = uint16(len(msg.Answers))
 	msg.Header.NSCount = uint16(len(msg.Authority))
 	msg.Header.ARCount = uint16(len(msg.Additional))
-	res = append(res, msg.Header.Encode()...)
-	res = append(res, msg.Question.Encode()...)
+	headerBytes := msg.Header.Encode()
+	questionBytes := msg.Question.Encode()
+	cap := len(headerBytes) + len(questionBytes)
+	for _, answer := range msg.Answers {
+		cap += len(answer.Name) + 10 + len(answer.RData)
+	}
+	for _, answer := range msg.Authority {
+		cap += len(answer.Name) + 10 + len(answer.RData)
+	}
+	for _, answer := range msg.Additional {
+		cap += len(answer.Name) + 10 + len(answer.RData)
+	}
+	res := make([]byte, 0, cap)
+	res = append(res, headerBytes...)
+	res = append(res, questionBytes...)
 
 	for _, answer := range msg.Answers {
 		res = append(res, answer.Encode(msg)...)
