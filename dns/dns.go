@@ -12,7 +12,7 @@ import (
 	"github.com/bernoussama/mercury/cache"
 )
 
-const hSize = 12
+const headerSize = 12
 const (
 	BUFFER_SIZE = 2048
 )
@@ -124,7 +124,7 @@ var types = map[QType]string{
 }
 
 func (header *Header) Encode() []byte {
-	headerBytes := make([]byte, hSize)
+	headerBytes := make([]byte, headerSize)
 	// Encoding logic here
 	flags := uint16(header.QR<<15 | header.Opcode<<11 | header.AA<<10 | header.TC<<9 | header.RD<<8 | header.RA<<7 | header.Z<<4 | header.RCODE)
 
@@ -313,13 +313,13 @@ func decodeAdditional(msg *Message, data []byte) int {
 
 func (msg *Message) Decode(data []byte) (int, error) {
 	// Decoding logic here
-	err := msg.Header.Decode(data[:hSize])
-	qOffset, err := msg.Question.Decode(data[hSize:])
+	err := msg.Header.Decode(data[:headerSize])
+	qOffset, err := msg.Question.Decode(data[headerSize:])
 	if err != nil {
 		return 0, err
 	}
 
-	mSize := qOffset + hSize
+	mSize := qOffset + headerSize
 	// if message is response
 	if msg.Header.QR == 1 {
 		// if answers count is > 0
