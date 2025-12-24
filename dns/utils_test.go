@@ -154,3 +154,255 @@ func TestDecodeDomain(t *testing.T) {
 		})
 	}
 }
+
+// TestEncodeDomainNameCapacity verifies that the buffer is properly preallocated
+func TestEncodeDomainNameCapacity(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		minCapacity    int
+		checkCapacity  bool
+	}{
+		{
+			name:          "simple domain",
+			input:         "example.com",
+			minCapacity:   15, // len("example.com") + 2
+			checkCapacity: true,
+		},
+		{
+			name:          "subdomain",
+			input:         "sub.example.com",
+			minCapacity:   19, // len("sub.example.com") + 2
+			checkCapacity: true,
+		},
+		{
+			name:          "long domain",
+			input:         "very.long.subdomain.example.com",
+			minCapacity:   35, // len + 2
+			checkCapacity: true,
+		},
+		{
+			name:          "single label",
+			input:         "localhost",
+			minCapacity:   11, // len("localhost") + 2
+			checkCapacity: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := EncodeDomainName(tt.input)
+			if err != nil {
+				t.Fatalf("EncodeDomainName() unexpected error = %v", err)
+			}
+			
+			// The capacity should be at least what we expect from the preallocated buffer
+			if tt.checkCapacity && cap(got) < tt.minCapacity {
+				t.Errorf("EncodeDomainName() capacity = %d, want >= %d", cap(got), tt.minCapacity)
+			}
+
+			// Verify the length is correct
+			if len(got) < 1 {
+				t.Errorf("EncodeDomainName() returned empty slice")
+			}
+		})
+	}
+}
+
+// TestEncodeDomainNameMultipleCalls verifies consistency across multiple calls
+func TestEncodeDomainNameMultipleCalls(t *testing.T) {
+	domain := "example.com"
+	
+	// Encode the same domain multiple times
+	results := make([][]byte, 100)
+	for i := 0; i < 100; i++ {
+		result, err := EncodeDomainName(domain)
+		if err != nil {
+			t.Fatalf("EncodeDomainName() error on iteration %d: %v", i, err)
+		}
+		results[i] = result
+	}
+
+	// Verify all results are identical
+	expected := results[0]
+	for i := 1; i < 100; i++ {
+		if !bytes.Equal(results[i], expected) {
+			t.Errorf("EncodeDomainName() iteration %d = %v, want %v", i, results[i], expected)
+		}
+	}
+}
+
+// TestEncodeDomainNameEdgeCases tests various edge cases
+func TestEncodeDomainNameEdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:    "multiple trailing dots",
+			input:   "example.com...",
+			wantErr: false, // Should trim trailing dots
+		},
+		{
+			name:    "domain with hyphen",
+			input:   "my-domain.com",
+			wantErr: false,
+		},
+		{
+			name:    "domain with numbers",
+			input:   "example123.com",
+			wantErr: false,
+		},
+		{
+			name:    "deeply nested subdomain",
+			input:   "a.b.c.d.e.f.example.com",
+			wantErr: false,
+		},
+		{
+			name:    "single character labels",
+			input:   "a.b.c",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := EncodeDomainName(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("EncodeDomainName() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got == nil {
+				t.Errorf("EncodeDomainName() returned nil for valid input")
+			}
+		})
+	}
+}
+
+// TestDecodeDomainNameEdgeCases tests edge cases for decoding
+func TestDecodeDomainNameEdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   []byte
+		wantErr bool
+		wantLen int
+	}{
+		{
+			name:    "multiple labels",
+			input:   []byte{1, 'a', 1, 'b', 1, 'c', 0},
+			wantErr: false,
+			wantLen: 7,
+		},
+		{
+			name:    "max length label",
+			input:   append(append([]byte{63}, bytes.Repeat([]byte{'a'}, 63)...), 0),
+			wantErr: false,
+			wantLen: 65,
+		},
+		{
+			name:    "invalid - label length exceeds data",
+			input:   []byte{100, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, offset, err := DecodeDomainName(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("DecodeDomainName() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if got == "" {
+					t.Errorf("DecodeDomainName() returned empty string")
+				}
+				if tt.wantLen > 0 && offset != tt.wantLen {
+					t.Errorf("DecodeDomainName() offset = %d, want %d", offset, tt.wantLen)
+				}
+			}
+		})
+	}
+}
+
+// TestEncodeDecodeRoundtrip tests that encoding and decoding are inverse operations
+func TestEncodeDecodeRoundtrip(t *testing.T) {
+	tests := []string{
+		"example.com",
+		"sub.example.com",
+		"a.b.c.d.e.f.example.com",
+		"localhost",
+		"my-domain.com",
+		"example123.com",
+	}
+
+	for _, domain := range tests {
+		t.Run(domain, func(t *testing.T) {
+			// Encode
+			encoded, err := EncodeDomainName(domain)
+			if err != nil {
+				t.Fatalf("EncodeDomainName() error = %v", err)
+			}
+
+			// Decode
+			decoded, _, err := DecodeDomainName(encoded)
+			if err != nil {
+				t.Fatalf("DecodeDomainName() error = %v", err)
+			}
+
+			// Compare (decoded will have trailing dot)
+			expectedDecoded := domain
+			if !bytes.HasSuffix([]byte(domain), []byte{'.'}) {
+				expectedDecoded = domain + "."
+			}
+
+			if decoded != expectedDecoded {
+				t.Errorf("Roundtrip failed: got %q, want %q", decoded, expectedDecoded)
+			}
+		})
+	}
+}
+
+// Benchmark tests to measure performance improvements
+
+func BenchmarkEncodeDomainName(b *testing.B) {
+	domain := "example.com"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = EncodeDomainName(domain)
+	}
+}
+
+func BenchmarkEncodeDomainNameLong(b *testing.B) {
+	domain := "very.long.subdomain.with.many.labels.example.com"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = EncodeDomainName(domain)
+	}
+}
+
+func BenchmarkEncodeDomainNameShort(b *testing.B) {
+	domain := "a.b"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = EncodeDomainName(domain)
+	}
+}
+
+func BenchmarkDecodeDomainName(b *testing.B) {
+	encoded := []byte{7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = DecodeDomainName(encoded)
+	}
+}
+
+func BenchmarkEncodeDecodeRoundtrip(b *testing.B) {
+	domain := "example.com"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		encoded, _ := EncodeDomainName(domain)
+		_, _, _ = DecodeDomainName(encoded)
+	}
+}
