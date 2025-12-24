@@ -13,19 +13,20 @@ func EncodeDomainName(dn string) ([]byte, error) {
 	if dn == "" || dn == "." {
 		return []byte{0}, nil
 	}
-	bytes := bytes.Buffer{}
 	dn = strings.TrimSuffix(dn, ".")
+	var buf bytes.Buffer
+	buf.Grow(len(dn) + 2)
 	parts := strings.Split(dn, ".")
 	for _, part := range parts {
 		if len(part) > 63 {
 			return nil, errors.New("label exceeds maximum length of 63 octets")
 		}
 
-		bytes.WriteByte(byte(len(part)))
-		bytes.WriteString(part)
+		buf.WriteByte(byte(len(part)))
+		buf.WriteString(part)
 	}
-	bytes.WriteByte(0)
-	return bytes.Bytes(), nil
+	buf.WriteByte(0)
+	return buf.Bytes(), nil
 }
 
 func DecodeDomainName(data []byte) (string, int, error) {
